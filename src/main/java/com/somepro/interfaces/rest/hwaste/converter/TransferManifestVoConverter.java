@@ -26,8 +26,11 @@ public final class TransferManifestVoConverter {
                 domain.getCategoryCode(),
                 domain.getTransporter(),
                 domain.getTransferWeight(),
+                domain.getReceivedWeight(),
                 domain.getCrossProvince(),
                 domain.getStatus() == null ? null : domain.getStatus().name(),
+                domain.getTransportBegin(),
+                domain.getReceiveAt(),
                 domain.getCreateTime());
     }
 

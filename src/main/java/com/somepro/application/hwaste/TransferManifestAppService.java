@@ -1,6 +1,7 @@
 package com.somepro.application.hwaste;
 
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.hwaste.model.ManifestStatus;
 import com.somepro.domain.hwaste.model.PlanStatus;
 import com.somepro.domain.hwaste.model.TransferManifest;
 import com.somepro.domain.hwaste.model.TreatmentUnit;
@@ -19,7 +20,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 
 /**
- * 电子转移联单用例编排（应用层）：提交 → 审批 / 退回，以及详情与多条件翻页。
+ * 电子转移联单用例编排（应用层）：提交 → 审批 / 退回，启运 → 签收，以及详情与多条件翻页。
  *
  * 提交一道道过门槛（规则落在领域对象，这里只做编排）：
  * 1. 产废单位、危废类别、处置单位都得真实存在；
@@ -32,6 +33,17 @@ import java.time.LocalDate;
  *
  * 审批只走一道：已提交才能批 / 退，退回必须写明理由；已批过、退过、作废的不再来回审，
  * 由领域状态机与仓储条件更新（仅 SUBMITTED 生效）双道兜底。
+ *
+ * 启运：只有已审批 APPROVED 的单子才启得动（落 IN_TRANSIT、记启运时刻）；
+ * 还在提交、被退回、已经走完的都由领域状态机 + 仓储条件更新挡下，不重复启运。
+ *
+ * 签收两处最要紧：
+ * 1. 认地磅实收重量 —— 车到厂里过磅多少就是多少，跟申报量往往对不齐，
+ *    入库账以过磅实收为准（落签收记录），不拿申报量硬顶；
+ * 2. 盯处置单位许可余量 —— 该单位累计已接收量 + 本趟实收量不得盖过许可上限，
+ *    超了整体挡回；这道在仓储签收事务的行锁内复核，并发两笔不会接穿。
+ *    签收顺利走完，处置单位累计已接收量按实收量往上加，与它实际收到的货对得上。
+ * 同一张联单重复签收是幂等空操作：第二下原样返回，不另立记录、不加第二次账。
  */
 @Service
 public class TransferManifestAppService {
@@ -114,6 +126,39 @@ public class TransferManifestAppService {
         return load(manifestId, manifestNo).flatMap(manifest -> {
             manifest.reject(reason);
             return transferManifestRepository.reject(manifest);
+        });
+    }
+
+    /**
+     * 启运：已审批 → 运输中，记启运时刻。
+     * 还在提交、被退回、已在途 / 已签收 / 已处置的都启不动 —— 领域状态机先挡，
+     * 仓储条件更新（仅 APPROVED 生效）再兜底，并发两笔启运只有一笔成。
+     */
+    public Mono<TransferManifest> beginTransport(Long manifestId, String manifestNo) {
+        return load(manifestId, manifestNo).flatMap(manifest -> {
+            manifest.beginTransport();
+            return transferManifestRepository.beginTransport(manifest);
+        });
+    }
+
+    /**
+     * 签收：运输中 → 已签收，认地磅实收重量、记签收时刻。
+     * 重量传的是车到厂里过磅的那个数，跟申报量对不齐也以它为准；货还没出门（未在途）签不了。
+     * 许可余量在仓储事务行锁内复核（累计已接收 + 本趟实收 ≤ 许可上限），超了整体挡回。
+     * 已经签收（或已走完）的单子再签是幂等空操作：第二下原样返回，不动记录、不加账。
+     */
+    public Mono<TransferManifest> receive(Long manifestId, String manifestNo, BigDecimal receivedWeight) {
+        if (receivedWeight == null || receivedWeight.signum() <= 0) {
+            return Mono.error(new BizException("实际过磅重量必须大于 0"));
+        }
+        return load(manifestId, manifestNo).flatMap(manifest -> {
+            // 已签收 / 已处置：重复签收幂等空转，第二下没什么可动
+            if (manifest.getStatus() == ManifestStatus.RECEIVED
+                    || manifest.getStatus() == ManifestStatus.DISPOSED) {
+                return Mono.just(manifest);
+            }
+            manifest.receive(receivedWeight);
+            return transferManifestRepository.receive(manifest, receivedWeight);
         });
     }
 

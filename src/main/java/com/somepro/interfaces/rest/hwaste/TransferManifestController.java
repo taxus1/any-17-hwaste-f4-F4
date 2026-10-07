@@ -15,7 +15,7 @@ import reactor.core.publisher.Mono;
 import java.math.BigDecimal;
 
 /**
- * 电子转移联单接口（用户接口层）：提交、审批、退回、详情与多条件翻页。
+ * 电子转移联单接口（用户接口层）：提交、审批、退回、启运、签收、详情与多条件翻页。
  *
  * 状态流转类接口的联单定位参数：manifestId 或 manifestNo 传其一即可。
  */
@@ -61,6 +61,33 @@ public class TransferManifestController {
                                                    @RequestParam(required = false) String manifestNo,
                                                    @RequestParam(required = false) String reason) {
         return transferManifestAppService.reject(manifestId, manifestNo, reason)
+                .map(TransferManifestVoConverter::toVo)
+                .map(Result::ok);
+    }
+
+    /**
+     * 启运：已审批 → 运输中，记启运时刻。
+     * 还在提交、被退回、已在途 / 已签收 / 已处置的都启不动，重复启运被挡回。
+     */
+    @PostMapping("/begin-transport")
+    public Mono<Result<TransferManifestVO>> beginTransport(@RequestParam(required = false) Long manifestId,
+                                                           @RequestParam(required = false) String manifestNo) {
+        return transferManifestAppService.beginTransport(manifestId, manifestNo)
+                .map(TransferManifestVoConverter::toVo)
+                .map(Result::ok);
+    }
+
+    /**
+     * 签收：运输中 → 已签收。receivedWeight 传车到厂里地磅过出来的实收重量（千克），
+     * 入库账认这个数，不拿申报量顶替；同时记签收时刻。
+     * 处置单位累计已接收量 + 本趟实收量若盖过许可上限会被挡下；
+     * 同一张联单重复签收幂等空转，第二下原样返回、不重复记账。
+     */
+    @PostMapping("/receive")
+    public Mono<Result<TransferManifestVO>> receive(@RequestParam(required = false) Long manifestId,
+                                                    @RequestParam(required = false) String manifestNo,
+                                                    @RequestParam(required = false) BigDecimal receivedWeight) {
+        return transferManifestAppService.receive(manifestId, manifestNo, receivedWeight)
                 .map(TransferManifestVoConverter::toVo)
                 .map(Result::ok);
     }

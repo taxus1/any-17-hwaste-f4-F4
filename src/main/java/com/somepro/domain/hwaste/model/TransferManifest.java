@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 /**
  * 电子转移联单（聚合根，纯领域，无框架注解）。
@@ -19,6 +20,11 @@ import java.math.BigDecimal;
  * - 这趟量连同该计划下已开出去的联单量，加在一起不能盖过计划批复总量（额度不穿）。
  * - 审批只走一道：SUBMITTED 才能批（→ APPROVED）或退（→ REJECTED，必须写明理由）；
  *   已批过、退过、已作废的不再来回审。
+ * - 启运：只有已审批 APPROVED 的单子才启得动（→ IN_TRANSIT，记启运时刻）；
+ *   还在提交、被退回、已走完的都别重复启运。
+ * - 签收：只有运输中 IN_TRANSIT 的单子才签得了（→ RECEIVED），认地磅实收重量、
+ *   记签收时刻；实收重量是正数，入库账以它为准，不用申报量顶替。
+ *   许可余量与累计量的对账由应用 / 仓储侧编排，不写进这个聚合。
  */
 @Getter
 @Setter
@@ -49,6 +55,18 @@ public class TransferManifest extends BaseEntity {
     private Integer crossProvince;
 
     private ManifestStatus status;
+
+    /** 启运时刻：车一出厂门就算启运，落 IN_TRANSIT 的同一刻记下。 */
+    private LocalDateTime transportBegin;
+
+    /** 签收时刻：货到对方过磅签收的时刻。 */
+    private LocalDateTime receiveAt;
+
+    /**
+     * 实际过磅签收重量（千克）：签收时传入，不持久在联单表上（落 t_manifest_signoff），
+     * 由仓储侧读取时回填。申报量看 transferWeight，实收量看这个，别拿申报量硬顶。
+     */
+    private BigDecimal receivedWeight;
 
     /**
      * 新开联单：入参先过一道，落 SUBMITTED。
@@ -109,6 +127,31 @@ public class TransferManifest extends BaseEntity {
             throw new BizException("退回必须写明理由");
         }
         this.status = ManifestStatus.REJECTED;
+    }
+
+    /**
+     * 启运：已审批 → 运输中，记启运时刻。
+     * 还在提交、被退回、已经在途 / 已签收 / 已处置的都不许重复启运。
+     */
+    public void beginTransport() {
+        require(status == ManifestStatus.APPROVED, "只有已审批的联单才能启运");
+        this.status = ManifestStatus.IN_TRANSIT;
+        this.transportBegin = LocalDateTime.now();
+    }
+
+    /**
+     * 签收：运输中 → 已签收，认地磅实收重量、记签收时刻。
+     * 货还没出门（未在途）的不许直接签收；实收重量必须大于 0。
+     * 许可余量够不够由应用层在锁内拿处置单位累计量先行核验，这里只守状态与重量。
+     */
+    public void receive(BigDecimal receivedWeight) {
+        require(status == ManifestStatus.IN_TRANSIT, "只有运输中的联单才能签收");
+        if (receivedWeight == null || receivedWeight.signum() <= 0) {
+            throw new BizException("实际过磅重量必须大于 0");
+        }
+        this.status = ManifestStatus.RECEIVED;
+        this.receivedWeight = receivedWeight;
+        this.receiveAt = LocalDateTime.now();
     }
 
     private static void require(boolean ok, String message) {

@@ -28,4 +28,11 @@ public interface TransferManifestMapper extends BaseMapper<TransferManifestPO> {
     @Select("SELECT IFNULL(SUM(transfer_weight), 0) FROM t_transfer_manifest "
             + "WHERE del_flag = 0 AND plan_id = #{planId} AND status NOT IN ('REJECTED', 'VOID')")
     BigDecimal sumTransferWeight(@Param("planId") Long planId);
+
+    /**
+     * 签收事务里按主键行锁取联单：签收推进状态得看到最新状态，
+     * 同一张单两笔并发签收时后到的在锁里直接走幂等空转，不会签第二回。
+     */
+    @Select("SELECT * FROM t_transfer_manifest WHERE id = #{id} AND del_flag = 0 FOR UPDATE")
+    TransferManifestPO selectByIdForUpdate(@Param("id") Long id);
 }
